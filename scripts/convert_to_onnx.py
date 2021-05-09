@@ -1,6 +1,8 @@
 import argparse
+import os
 
 import torch
+import onnx
 
 from models.with_mobilenet import PoseEstimationWithMobileNet
 from modules.load_state import load_state
@@ -12,7 +14,14 @@ def convert_to_onnx(net, output_name):
     output_names = ['stage_0_output_1_heatmaps', 'stage_0_output_0_pafs',
                     'stage_1_output_1_heatmaps', 'stage_1_output_0_pafs']
 
-    torch.onnx.export(net, input, output_name, verbose=True, input_names=input_names, output_names=output_names)
+    output_path = "../optimized_models/onnx"
+    os.makedirs(output_path, exist_ok=True)
+
+    torch.onnx.export(net, input, os.path.join(output_path, output_name), verbose=True, input_names=input_names,
+                      output_names=output_names, do_constant_folding=True, export_params=True, opset_version=10)
+    model = onnx.load(os.path.join(output_path, output_name))
+    model.graph.input[0].type.tensor_type.shape.dim[3].dim_param = '?'
+    onnx.save(model, (os.path.join(output_path, os.path.splitext(output_name)[0] + "-dynamic.onnx")))
 
 
 if __name__ == '__main__':
@@ -24,6 +33,7 @@ if __name__ == '__main__':
 
     net = PoseEstimationWithMobileNet()
     checkpoint = torch.load(args.checkpoint_path)
+    net.eval()
     load_state(net, checkpoint)
 
     convert_to_onnx(net, args.output_name)
