@@ -17,6 +17,8 @@ from models.with_mobilenet import PoseEstimationWithMobileNet
 from modules.keypoints import extract_keypoints, group_keypoints
 from modules.load_state import load_state
 
+from scripts.convert_to_openvino import openvino_network
+
 
 def run_coco_eval(gt_file_path, dt_file_path):
     annotation_type = 'keypoints'
@@ -84,7 +86,10 @@ def convert_to_coco_format(pose_entries, all_keypoints):
 
 def infer(net, img, scales, base_height, stride, pad_value=(0, 0, 0), img_mean=(128, 128, 128), img_scale=1/256,
           mode="pytorch"):
-    normed_img = normalize(img, img_mean, img_scale)
+    if mode != "openvino":
+        normed_img = normalize(img, img_mean, img_scale)
+    else:
+        normed_img = img
     height, width, _ = normed_img.shape
     scales_ratios = [scale * base_height / float(height) for scale in scales]
     avg_heatmaps = np.zeros((height, width, 19), dtype=np.float32)
@@ -126,7 +131,11 @@ def infer(net, img, scales, base_height, stride, pad_value=(0, 0, 0), img_mean=(
             for idx, output_t in enumerate(output_details):
                 stages_output.append(net.get_tensor(output_t['index']))
 
-        stage2_heatmaps = stages_output[-2]
+        elif mode == "openvino":
+            img_prepared = net.prepare_image_for_infer(padded_img)
+            stages_output = net.infer(img_prepared)
+
+        stage2_heatmaps = stages_output[-1]
         if mode == "pytorch":
             heatmaps = np.transpose(stage2_heatmaps.squeeze().cpu().data.numpy(), (1, 2, 0))
         else:
@@ -137,7 +146,7 @@ def infer(net, img, scales, base_height, stride, pad_value=(0, 0, 0), img_mean=(
         heatmaps = cv2.resize(heatmaps, (width, height), interpolation=cv2.INTER_CUBIC)
         avg_heatmaps = avg_heatmaps + heatmaps / len(scales_ratios)
 
-        stage2_pafs = stages_output[-1]
+        stage2_pafs = stages_output[-2]
         if mode == "pytorch":
             pafs = np.transpose(stage2_pafs.squeeze().cpu().data.numpy(), (1, 2, 0))
         else:
@@ -311,6 +320,8 @@ def evaluate_core(labels, output_name, images_folder, net, multiscale=False, vis
         total_keypoints_num = 0
         all_keypoints_by_type = []
         for kpt_idx in range(18):  # 19th for bg
+            #cv2.imshow("hetmap", avg_heatmaps[:, :, kpt_idx])
+            #cv2.waitKey(0)
             total_keypoints_num += extract_keypoints(avg_heatmaps[:, :, kpt_idx], all_keypoints_by_type, total_keypoints_num)
 
         pose_entries, all_keypoints = group_keypoints(all_keypoints_by_type, avg_pafs)
@@ -359,13 +370,14 @@ def evaluate(args):
         interpreter = tf.lite.Interpreter(model_path="/home/valia/dev/lightweight-human-pose-estimation.pytorch/optimized_models/tensorflow/converted_model.tflite")
         interpreter.allocate_tensors()
         evaluate_core(args.labels, args.output_name, args.images_folder, interpreter, args.multiscale, args.visualize, args.mode)
-
-
+    elif args.mode == "openvino":
+        openvino_net = openvino_network(args)
+        evaluate_core(args.labels, args.output_name, args.images_folder, openvino_net, args.multiscale, args.visualize, args.mode)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    framework_options = ["pytorch", "onnx", "tensorflow", "tflite"]
+    framework_options = ["pytorch", "onnx", "tensorflow", "tflite", "openvino"]
     parser.add_argument('--labels', type=str, required=True, help='path to json with keypoints val labels')
     parser.add_argument('--output-name', type=str, default='detections.json',
                         help='name of output json file with detected keypoints')
